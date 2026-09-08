@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Google Form Automation</title>
+    <style>
+        body { font-family: monospace; max-width: 800px; margin: 40px auto; padding: 20px; background: #121212; color: #fff; }
+        .card { background: #1e1e1e; padding: 20px; border: 2px solid #fff; margin-bottom: 20px; }
+        h2 { border: none; padding: 0; margin-top: 0; }
+        input[type="text"], input[type="number"], select, button { width: 100%; padding: 10px; margin-top: 10px; box-sizing: border-box; font-family: monospace; font-size: 14px; border: 2px solid #fff; background: #121212; color: #fff; outline: none; }
+        select option { background: #121212; color: #fff; }
+        button { background: #fff; color: #000; cursor: pointer; font-weight: bold; }
+        button:hover { background: #ccc; }
+        .hidden { display: none; }
+        .question-block { margin-bottom: 25px; border-bottom: 2px dashed #fff; padding-bottom: 15px; }
+
+        .multi-slider-container { margin-top: 15px; }
+        .slider-track-wrap { position: relative; height: 40px; display: flex; align-items: center; }
+        .slider-track { position: absolute; width: 100%; height: 10px; background: #333; border: 2px solid #fff; overflow: hidden; }
+        .slider-fill-segment { position: absolute; height: 100%; top: 0; }
+
+        .thumb {
+            position: absolute;
+            width: 16px;
+            height: 24px;
+            background: #fff;
+            border: 2px solid #000;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            cursor: ew-resize;
+            z-index: 10;
+        }
+
+        .segments-info { display: flex; justify-content: space-between; margin-top: 8px; font-size: 13px; color: #ccc; }
+        .segment-badge { padding: 2px 6px; border: 1px solid #fff; font-weight: bold; background: #000; }
+    </style>
+</head>
+<body>
+
+    <div class="card" id="step1">
+        <h2>Шаг 1: Ссылка на форму</h2>
+        <input type="text" id="formUrl" placeholder="Вставьте ссылку на Google Форму или forms.gle">
+        <button onclick="parseForm()">Получить вопросы</button>
+    </div>
+
+    <div class="card hidden" id="step2">
+        <h2>Шаг 2: Настройка отправки</h2>
+
+        <label><b>Режим генерации:</b></label>
+        <select id="submitMode" onchange="toggleMode()">
+            <option value="random">Random (Случайный выбор)</option>
+            <option value="deterministic">Deterministic (По ползункам)</option>
+        </select>
+
+        <label style="margin-top: 15px; display: block;"><b>Общее количество отправок (Макс. 50):</b></label>
+        <input type="number" id="totalNumber" value="10" min="1" max="50" onchange="updateTotalLimit()">
+
+        <div id="slidersSection" class="hidden" style="margin-top: 20px;">
+            <div id="optionsContainer"></div>
+        </div>
+
+        <button onclick="submitData()" style="margin-top: 20px;">Запустить отправку</button>
+    </div>
+
+    <div class="card hidden" id="step3">
+        <h2>Статус</h2>
+        <p id="statusText">Выполняется отправка...</p>
+        <button onclick="resetToStart()" style="margin-top: 15px;">Отправить еще</button>
+    </div>
+
+    <script>
+        let globalData = {};
+        let questionValues = {};
+        const colors = ['#ff5733', '#33ff57', '#3357ff', '#f3ff33', '#ff33f3', '#33fff3', '#ffa533'];
+
+        async function parseForm() {
+            const url = document.getElementById('formUrl').value;
+            if (!url) return alert('Введите ссылку!');
+
+            const res = await fetch('/api/parse', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url })
+            });
+            const data = await res.json();
+
+            if (data.error) return alert(data.error);
+
+            globalData.url = url;
+            globalData.formOptions = data.formOptions;
+
+            const total = parseInt(document.getElementById('totalNumber').value) || 10;
+            for (const [entry, optData] of Object.entries(globalData.formOptions)) {
+                const countOptions = optData.options.length;
+                let base = Math.floor(total / countOptions);
+                let rem = total % countOptions;
+                let arr = [];
+                for (let i = 0; i < countOptions; i++) {
+                    arr.push(base + (i < rem ? 1 : 0));
+                }
+                questionValues[entry] = arr;
+            }
+
+            renderOptions();
+            document.getElementById('step1').classList.add('hidden');
+            document.getElementById('step2').classList.remove('hidden');
+            toggleMode();
+        }
+
+        function toggleMode() {
+            const mode = document.getElementById('submitMode').value;
+            const slidersSection = document.getElementById('slidersSection');
+            if (mode === 'deterministic') {
+                slidersSection.classList.remove('hidden');
+            } else {
+                slidersSection.classList.add('hidden');
+            }
+        }
+
+        function renderOptions() {
+            const container = document.getElementById('optionsContainer');
+            container.innerHTML = '';
+
+            for (const [entry, data] of Object.entries(globalData.formOptions)) {
+                container.innerHTML += `
+                    <div class="question-block" data-entry="${entry}">
+                        <strong>${data.title}</strong>
+                        <div class="multi-slider-container">
+                            <div class="slider-track-wrap" id="wrap_${entry}" onmousedown="startDrag(event, '${entry}')" ontouchstart="startDrag(event, '${entry}')">
+                                <div class="slider-track" id="track_${entry}"></div>
+                            </div>
+                            <div class="segments-info" id="info_${entry}"></div>
+                        </div>
+                    </div>
+                `;
+                updateSliderUI(entry);
+            }
+        }
+
+        function updateSliderUI(entry) {
+            const total = parseInt(document.getElementById('totalNumber').value) || 10;
+            const values = questionValues[entry];
+            const wrap = document.getElementById(`wrap_${entry}`);
+            const track = document.getElementById(`track_${entry}`);
+            const info = document.getElementById(`info_${entry}`);
+
+            wrap.querySelectorAll('.thumb').forEach(el => el.remove());
+            track.innerHTML = '';
+            info.innerHTML = '';
+
+            let accum = 0;
+            values.forEach((val, idx) => {
+                accum += val;
+                let percentLeft = ((accum - val) / total) * 100;
+                let percentWidth = (val / total) * 100;
+
+                let segment = document.createElement('div');
+                segment.className = 'slider-fill-segment';
+                segment.style.left = percentLeft + '%';
+                segment.style.width = percentWidth + '%';
+                segment.style.backgroundColor = colors[idx % colors.length];
+                track.appendChild(segment);
+
+                info.innerHTML += `<span>${optionsName(entry, idx)}: <span class="segment-badge" style="color: ${colors[idx % colors.length]}">${val}</span></span>`;
+            });
+
+            let currentSum = 0;
+            for (let i = 0; i < values.length - 1; i++) {
+                currentSum += values[i];
+                let percentPos = (currentSum / total) * 100;
+
+                let thumb = document.createElement('div');
+                thumb.className = 'thumb';
+                thumb.style.left = percentPos + '%';
+                thumb.dataset.index = i;
+                wrap.appendChild(thumb);
+            }
+        }
+
+        function optionsName(entry, idx) {
+            return globalData.formOptions[entry].options[idx];
+        }
+
+        function updateTotalLimit() {
+            let totalInput = document.getElementById('totalNumber');
+            let newTotal = parseInt(totalInput.value) || 10;
+
+            if (newTotal > 50) {
+                newTotal = 50;
+                totalInput.value = 50;
+            } else if (newTotal < 1) {
+                newTotal = 1;
+                totalInput.value = 1;
+            }
+
+            for (const entry of Object.keys(globalData.formOptions)) {
+                let values = questionValues[entry];
+                let currentSum = values.reduce((a, b) => a + b, 0);
+                let diff = newTotal - currentSum;
+                values[values.length - 1] += diff;
+                if (values[values.length - 1] < 0) {
+                    values[values.length - 1] = 0;
+                }
+                updateSliderUI(entry);
+            }
+        }
+
+        function startDrag(e, entry) {
+            const thumb = e.target.closest('.thumb');
+            if (!thumb) return;
+
+            e.preventDefault();
+            const wrap = document.getElementById(`wrap_${entry}`);
+            const rect = wrap.getBoundingClientRect();
+            const total = parseInt(document.getElementById('totalNumber').value) || 10;
+            const thumbIndex = parseInt(thumb.dataset.index);
+
+            function onMove(clientX) {
+                let x = clientX - rect.left;
+                let percent = Math.max(0, Math.min(1, x / rect.width));
+                let targetSum = Math.round(percent * total);
+
+                let values = questionValues[entry];
+                let currentBoundaryVal = 0;
+                for(let i = 0; i <= thumbIndex; i++) currentBoundaryVal += values[i];
+
+                let delta = targetSum - currentBoundaryVal;
+                if (delta !== 0) {
+                    let leftVal = values[thumbIndex] + delta;
+                    let rightVal = values[thumbIndex + 1] - delta;
+
+                    if (leftVal >= 0 && rightVal >= 0) {
+                        values[thumbIndex] = leftVal;
+                        values[thumbIndex + 1] = rightVal;
+                        updateSliderUI(entry);
+                    }
+                }
+            }
+
+            function onMouseMove(ev) { onMove(ev.clientX); }
+            function onTouchMove(ev) { if(ev.touches.length > 0) onMove(ev.touches[0].clientX); }
+
+            function onEnd() {
+                window.removeEventListener('mousemove', onMouseMove);
+                window.removeEventListener('mouseup', onEnd);
+                window.removeEventListener('touchmove', onTouchMove);
+                window.removeEventListener('touchend', onEnd);
+            }
+
+            window.addEventListener('mousemove', onMouseMove);
+            window.addEventListener('mouseup', onEnd);
+            window.addEventListener('touchmove', onTouchMove);
+            window.addEventListener('touchend', onEnd);
+        }
+
+        async function submitData() {
+            let total = parseInt(document.getElementById('totalNumber').value);
+            if (total > 50) total = 50;
+
+            const mode = document.getElementById('submitMode').value;
+
+            document.getElementById('step2').classList.add('hidden');
+            document.getElementById('step3').classList.remove('hidden');
+            document.getElementById('statusText').innerText = 'Выполняется отправка...';
+
+            const response = await fetch('/api/submit', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    url: globalData.url,
+                    formOptions: globalData.formOptions,
+                    countsMap: questionValues,
+                    total,
+                    mode
+                })
+            });
+
+            const result = await response.json();
+            if (result.success) {
+                document.getElementById('statusText').innerText = `Готово! Успешно отправлено: ${result.sent} из ${result.total}`;
+            } else {
+                document.getElementById('statusText').innerText = `Ошибка: ${result.error}`;
+            }
+        }
+
+        function resetToStart() {
+            document.getElementById('step3').classList.add('hidden');
+            document.getElementById('step2').classList.remove('hidden');
+        }
+    </script>
+</body>
+</html>
